@@ -1057,22 +1057,27 @@ static id HbSimRetNil(id self, SEL _cmd) { return nil; }
 static id HbSimRetEmptyDict(id self, SEL _cmd) { return @{}; }
 
 static void HBInstallSimHide(void) {
-    static struct { const char *sel; BOOL wantDict; } targets[] = {
-        { "sourceInformation",   YES },   // 定位来源 → 空字典，SDK 认为「无来源信息」
-        { "collectInfo:",        NO  },   // 上报收集 → 不返回内容
-        { "buildExtraString",    NO  },
-        { "customExtra:",        NO  },
+    // 只扫白名单类。
+    // 之前是全类扫描（这个包 6 万多个类 × 类/元类 × 每个类的方法），
+    // 光 strcmp 就几百万次，在 %ctor 阶段做直接把启动拖过 watchdog 时限 -> 闪退。
+    static const char *kClasses[] = {
+        // 阿里安全 SDK 自家类
+        "SPCheckInfo", "SPAppInfo", "SPCollectorBase", "SPDeviceInfo",
+        "SPJailbreakSniffer", "BHXDeviceInfoHelper", "AliSecXDeviceInfo",
+        "AliSecXCollector", "AliSecXComm", "SPUtils",
+        // 定位来源相关
+        "CLLocationSourceInformation", "CLLocation", "CLLocationManager",
+        NULL
     };
 
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return;
-    Class *classes = (Class *)malloc(sizeof(Class) * count);
-    if (!classes) return;
-    count = objc_getClassList(classes, count);
+    static const char *kSels[]   = { "sourceInformation", "collectInfo:",
+                                     "buildExtraString", "customExtra:" };
+    static const BOOL  kWantDict[] = { YES, NO, NO, NO };
 
     int patched = 0;
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
+    for (int c = 0; kClasses[c]; c++) {
+        Class cls = objc_getClass(kClasses[c]);
+        if (!cls) continue;
         for (int meta = 0; meta < 2; meta++) {
             Class t = meta ? object_getClass(cls) : cls;
             if (!t) continue;
@@ -1083,8 +1088,8 @@ static void HBInstallSimHide(void) {
                 const char *nm = sel_getName(method_getName(ms[j]));
                 if (!nm) continue;
                 for (int k = 0; k < 4; k++) {
-                    if (strcmp(nm, targets[k].sel) != 0) continue;
-                    IMP imp = targets[k].wantDict ? (IMP)HbSimRetEmptyDict : (IMP)HbSimRetNil;
+                    if (strcmp(nm, kSels[k]) != 0) continue;
+                    IMP imp = kWantDict[k] ? (IMP)HbSimRetEmptyDict : (IMP)HbSimRetNil;
                     method_setImplementation(ms[j], imp);
                     patched++;
                 }
@@ -1092,7 +1097,6 @@ static void HBInstallSimHide(void) {
             free(ms);
         }
     }
-    free(classes);
     NSLog(@"[HBGuard] simHide patched=%d", patched);
 }
 
@@ -1102,12 +1106,19 @@ static void _hbg_ctor_1(void) {
     @autoreleasepool {
         if (!HBGEnabled()) return;
 
-        if (HBGSimHideEnabled()) HBInstallSimHide();
-
+        // hook 安装：只是 method_setImplementation，安全，立即做
         if (objc_getClass("SPJailbreakSniffer"))     %init(JB);
         if (objc_getClass("SPAppInfo"))              %init(INTEG);
         if (objc_getClass("SPCollectorBase"))        %init(REPORT);
         if (objc_getClass("LPDAppVersionService"))   %init(UPDATE);
+
+        // 方法扫描：延迟到 UI 出来之后再做，不占启动时间（watchdog 会杀）
+        if (HBGSimHideEnabled()) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                @autoreleasepool { HBInstallSimHide(); }
+            });
+        }
     }
 }
 
