@@ -22,13 +22,14 @@ jobs:
         run: |
           set -x
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld make git curl xz-utils
+          sudo apt-get install -y -qq clang lld llvm make git curl xz-utils
           if ! command -v ldid >/dev/null 2>&1; then
             curl -fsSL -o /tmp/ldid \
               https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64 \
               && sudo install -m755 /tmp/ldid /usr/local/bin/ldid
           fi
           ldid -v 2>/dev/null || true
+          command -v llvm-strip || find /usr -name 'llvm-strip*' 2>/dev/null | head -3
           clang --version | head -1
 
       - name: Clone Theos
@@ -56,8 +57,14 @@ jobs:
           fi
           LDID="$(command -v ldid || true)"
           [ -n "$LDID" ] && ln -sf "$LDID" "$TC/ldid"
+          STRIP="$(command -v llvm-strip || find /usr -name 'llvm-strip*' 2>/dev/null | head -1)"
+          echo "strip=$STRIP"
+          [ -n "$STRIP" ] && ln -sf "$STRIP" "$TC/strip"
+          for t in llvm-objcopy llvm-otool llvm-nm; do
+            p="$(command -v $t || find /usr -name "$t*" 2>/dev/null | head -1)"
+            [ -n "$p" ] && ln -sf "$p" "$TC/${t#llvm-}"
+          done
           ls -la "$TC"
-          which ld64.lld ld64 || true
 
       - name: Fetch single iOS SDK (sparse)
         run: |
