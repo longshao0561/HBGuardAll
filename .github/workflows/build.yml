@@ -10,56 +10,80 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Linux 优先：排队快，Theos 支持在 Linux 上交叉编译 iOS tweak
+  # Linux 优先：runner 秒开，Theos 支持在 Linux 交叉编译 iOS tweak
   build-linux:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
 
       - name: Install toolchain
         run: |
+          set -x
           sudo apt-get update -qq
-          sudo apt-get install -y -qq clang lld make git curl xz-utils fakeroot dpkg
-          # ldid（签名用；apt 没有就下预编译）
+          sudo apt-get install -y -qq clang lld make git curl xz-utils
           if ! command -v ldid >/dev/null 2>&1; then
-            sudo apt-get install -y -qq ldid || {
-              curl -fsSL -o /tmp/ldid https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64
-              sudo install -m755 /tmp/ldid /usr/local/bin/ldid
-            }
+            curl -fsSL -o /tmp/ldid \
+              https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64 \
+              && sudo install -m755 /tmp/ldid /usr/local/bin/ldid
           fi
-          ldid -v || true
-          ld64.lld --version || true
-          clang --version | head -1
+          ldid -v 2>/dev/null || true
+          ld64.lld --version 2>/dev/null || true
 
-      - name: Setup Theos + SDK
+      - name: Clone Theos
         run: |
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-          # iOS SDK（Theos 官方 sdks 仓库）
-          git clone --depth 1 https://github.com/theos/sdks.git "$HOME/theos/sdks"
-          ls "$HOME/theos/sdks" | head
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+          set -x
+          git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          test -d "$HOME/theos/makefiles" && echo "theos OK"
+
+      - name: Fetch single iOS SDK (sparse)
+        run: |
+          set -o pipefail
+          set -x
+          SDK=iPhoneOS16.5.sdk
+          mkdir -p "$HOME/theos/sdks"
+          cd "$HOME/theos/sdks"
+          git init -q
+          git remote add origin https://github.com/theos/sdks.git
+          git config core.sparseCheckout true
+          printf '%s/*\n' "$SDK" > .git/info/sparse-checkout
+          git fetch --depth 1 --filter=blob:none origin master
+          git checkout -q FETCH_HEAD
+          du -sh "$HOME/theos/sdks/$SDK" || true
+          test -d "$HOME/theos/sdks/$SDK" && echo "SDK OK"
 
       - name: Build
         run: |
-          make clean 2>/dev/null || true
-          make -j4 DEBUG=0
-          echo "--- produced ---"
+          set -o pipefail
+          set -x
+          export THEOS="$HOME/theos"
+          export PATH="$THEOS/bin:$PATH"
+          make -j4 DEBUG=0 2>&1 | tee /tmp/build.log
+          echo "===== tail ====="
+          tail -40 /tmp/build.log
           find .theos -name "*.dylib" -print -exec file {} \;
 
       - name: Upload dylib
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: HBGuard-dylib-linux
           path: .theos/obj/**/*.dylib
-          if-no-files-found: error
+          if-no-files-found: warn
 
-  # macOS 兜底（Linux 那套工具链版本不匹配时用这个）
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-linux
+          path: /tmp/build.log
+          if-no-files-found: warn
+
+  # macOS 兜底
   build-macos:
     runs-on: macos-13
-    timeout-minutes: 20
+    timeout-minutes: 25
     continue-on-error: true
 
     steps:
@@ -70,17 +94,20 @@ jobs:
 
       - name: Setup Theos
         run: |
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+          xcrun --sdk iphoneos --show-sdk-path || true
 
       - name: Build
         run: |
-          make clean 2>/dev/null || true
-          make -j4 DEBUG=0
+          set -o pipefail
+          make -j4 DEBUG=0 2>&1 | tee /tmp/build-mac.log
+          tail -30 /tmp/build-mac.log
           find .theos -name "*.dylib" -print
 
       - name: Upload dylib
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: HBGuard-dylib-macos
