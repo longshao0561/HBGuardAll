@@ -23,6 +23,7 @@
 #import <sys/stat.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
+#import <mach-o/nlist.h>
 #import <mach/mach.h>
 #import <mach/vm_prot.h>
 #import <CommonCrypto/CommonDigest.h>
