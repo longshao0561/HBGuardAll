@@ -6,3 +6,5 @@ out/
 *.dylib
 *.o
 .DS_Store
+_push.log
+_push.err

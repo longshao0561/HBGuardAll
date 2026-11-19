@@ -5,53 +5,46 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+# 同一分支只跑最新一次，避免重复排队
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
-    runs-on: macos-latest
-    timeout-minutes: 20
+    # macos-13 = Intel(x86_64) runner：
+    #   - arm64 runner 容量紧张时排队很久，Intel 通常立刻有
+    #   - 交叉编译 arm64/arm64e 完全没问题
+    runs-on: macos-13
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Install ldid
-        run: brew install ldid xz || true
+        run: brew install ldid xz >/dev/null 2>&1 || true
 
       - name: Setup Theos
         run: |
           git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+          echo "SDK: $(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo none)"
+          echo "SDK version: $(xcrun --sdk iphoneos --show-sdk-version 2>/dev/null || echo none)"
 
-      - name: Show toolchain
-        run: |
-          echo "THEOS=$THEOS"
-          xcodebuild -version || true
-          xcrun --sdk iphoneos --show-sdk-version || true
-
-      # 主目标：编译出 dylib（这一步必须成功）
       - name: Build dylib
         run: |
           make clean 2>/dev/null || true
-          make -j$(sysctl -n hw.ncpu) DEBUG=0
-          echo "--- build tree ---"
-          find .theos -name "*.dylib" -o -name "HBGuard" | head -20
+          make -j4 DEBUG=0
+          find .theos -name "HBGuard.dylib" -print
 
-      - name: Collect artifacts
+      - name: Collect
         run: |
           mkdir -p out
           find .theos -name "HBGuard.dylib" -exec cp {} out/ \; 2>/dev/null || true
-          if [ ! -f out/HBGuard.dylib ]; then
-            find . -name "HBGuard.dylib" -not -path "./out/*" -exec cp {} out/ \; 2>/dev/null || true
-          fi
-          ls -la out/ || true
-          file out/*.dylib 2>/dev/null || true
-
-      # 可选：尝试打 deb（失败不影响 dylib 产物）
-      - name: Try build deb
-        continue-on-error: true
-        run: |
-          make package FINALPACKAGE=1 DEBUG=0 || echo "package skipped (no dpkg-deb)"
+          [ -f out/HBGuard.dylib ] || find . -name "HBGuard.dylib" -not -path "./out/*" -exec cp {} out/ \; 2>/dev/null || true
+          ls -la out/
+          file out/*.dylib || true
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
@@ -59,6 +52,10 @@ jobs:
           name: HBGuard-dylib
           path: out/*.dylib
           if-no-files-found: error
+
+      - name: Try deb
+        continue-on-error: true
+        run: make package FINALPACKAGE=1 DEBUG=0 || true
 
       - name: Upload deb
         if: always()
