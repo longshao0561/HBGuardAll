@@ -294,7 +294,7 @@ int hbg_rename_id_dylib(uint32_t idx, const char *fake) {
     const char *base = strrchr(fake, '/');
     base = base ? base + 1 : fake;            // LC_ID_DYLIB 一般只存 basename
 
-    const struct load_command *lc = (const void *)(mh + 1);
+    const struct load_command *lc = (const struct load_command *)(mh + 1);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         if (lc->cmd == LC_ID_DYLIB) {
             struct dylib_command *dc = (struct dylib_command *)(uintptr_t)lc;
@@ -416,10 +416,10 @@ static int rebind_image(const struct mach_header_64 *mh,
     const struct symtab_command   *symtab = NULL;
     const struct dysymtab_command *dysym  = NULL;
 
-    const struct load_command *lc = (const void *)(mh + 1);
+    const struct load_command *lc = (const struct load_command *)(mh + 1);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
-        if (lc->cmd == LC_SYMTAB)         symtab = (const void *)lc;
-        else if (lc->cmd == LC_DYSYMTAB)  dysym  = (const void *)lc;
+        if (lc->cmd == LC_SYMTAB)         symtab = (const struct symtab_command *)lc;
+        else if (lc->cmd == LC_DYSYMTAB)  dysym  = (const struct dysymtab_command *)lc;
         lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
     }
     if (!symtab || !dysym) return 0;
@@ -430,20 +430,20 @@ static int rebind_image(const struct mach_header_64 *mh,
     const uint32_t        *ind  = (const uint32_t *)((const char *)mh + dysym->indirectsymoff);
 
     int hits = 0;
-    lc = (const void *)(mh + 1);
+    lc = (const struct load_command *)(mh + 1);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
         if (lc->cmd != LC_SEGMENT_64) {
             lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
             continue;
         }
-        const struct segment_command_64 *sg = (const void *)lc;
+        const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
         if (strcmp(sg->segname, "__DATA") != 0 &&
             strcmp(sg->segname, "__DATA_CONST") != 0) {
             lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
             continue;
         }
 
-        const struct section_64 *sec = (const void *)(sg + 1);
+        const struct section_64 *sec = (const struct section_64 *)(sg + 1);
         for (uint32_t s = 0; s < sg->nsects; s++, sec++) {
             uint32_t type = sec->flags & SECTION_TYPE;
             if (type != S_LAZY_SYMBOL_POINTERS &&
