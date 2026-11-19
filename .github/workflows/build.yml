@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Linux 优先：runner 秒开，Theos 支持在 Linux 交叉编译 iOS tweak
+  # Linux 优先：runner 秒开
   build-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -29,18 +29,15 @@ jobs:
               && sudo install -m755 /tmp/ldid /usr/local/bin/ldid
           fi
           ldid -v 2>/dev/null || true
-          ld64.lld --version 2>/dev/null || true
+          clang --version | head -1
 
       - name: Clone Theos
         run: |
           set -x
           git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
           cd "$HOME/theos"
-          # Logos 生成的代码要 #include <substrate.h>，它在 vendor/ 子模块里
           git submodule update --init --recursive --depth 1
-          echo "--- vendor ---"
-          ls vendor/ 2>/dev/null || echo "vendor MISSING"
-          ls vendor/include/substrate.h 2>/dev/null || echo "substrate.h MISSING"
+          ls vendor/include/substrate.h && echo "substrate.h OK"
           test -d "$HOME/theos/makefiles" && echo "theos OK"
 
       - name: Linux toolchain shim
@@ -52,11 +49,15 @@ jobs:
           ln -sf "$(command -v clang++)" "$TC/clang++"
           LD64="$(command -v ld64.lld || find /usr -name 'ld64.lld' 2>/dev/null | head -1)"
           echo "ld64=$LD64"
-          [ -n "$LD64" ] && ln -sf "$LD64" "$TC/ld64"
+          if [ -n "$LD64" ]; then
+            ln -sf "$LD64" "$TC/ld64"
+            sudo ln -sf "$LD64" /usr/local/bin/ld64.lld
+            sudo ln -sf "$LD64" /usr/local/bin/ld64
+          fi
           LDID="$(command -v ldid || true)"
           [ -n "$LDID" ] && ln -sf "$LDID" "$TC/ldid"
           ls -la "$TC"
-          "$TC/clang" --version | head -1 || true
+          which ld64.lld ld64 || true
 
       - name: Fetch single iOS SDK (sparse)
         run: |
@@ -80,8 +81,6 @@ jobs:
           export THEOS="$HOME/theos"
           export PATH="$THEOS/bin:$PATH"
           echo "THEOS=$THEOS"
-          ls "$THEOS/makefiles/common.mk" || echo "common.mk MISSING"
-          ls -d "$THEOS"/sdks/*.sdk || echo "no sdk dir"
 
           set +e
           make -j4 DEBUG=0 2>&1 | tee /tmp/build.log
@@ -91,7 +90,6 @@ jobs:
           echo "===== tail ====="
           tail -40 /tmp/build.log
 
-          # 把失败日志转成 annotation —— 匿名 API 可读，方便定位
           if [ $rc -ne 0 ]; then
             tail -25 /tmp/build.log | while IFS= read -r line; do
               [ -n "$line" ] && echo "::error title=build::$line"
@@ -132,6 +130,8 @@ jobs:
       - name: Setup Theos
         run: |
           git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          cd "$HOME/theos"
+          git submodule update --init --recursive --depth 1
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
           xcrun --sdk iphoneos --show-sdk-path || true
