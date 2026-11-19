@@ -14,16 +14,12 @@ HBGuard_FILES = HBGuardAll.xm
 HBGuard_CFLAGS = -fobjc-arc -Wno-deprecated-declarations -Wno-unused-function -Wno-objc-method-access
 HBGuard_FRAMEWORKS = Foundation CFNetwork
 
-# 我们的 hook 全走 method_setImplementation，不需要 MSHookFunction。
-# 但 Theos 的 tweak.mk 会强制 -lsubstrate，于是 dylib 里多一条
-# LC_LOAD_DYLIB /Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate。
-#   - 越狱(ellekit)：有完整 CydiaSubstrate，能加载
-#   - 全能签注入：包里只有裁剪版 libsubstrate.dylib，缺符号 -> dyld abort -> 闪退
-# dead_strip_dylibs 让链接器把「没有任何符号引用」的 dylib 依赖整条删掉。
-HBGuard_LDFLAGS = -Wl,-dead_strip_dylibs
+# 注意：不要加 -Wl,-dead_strip_dylibs。
+# 试过，它会把 CFNetwork 这种「暂时没有符号引用」的依赖也删掉（依赖 7 条变 6 条）。
+# substrate 依赖改走事后 patch：tools/patch_weak_substrate.py 把它降级成 weak。
 
 ifneq ($(shell uname),Darwin)
-HBGuard_LDFLAGS += -fuse-ld=lld
+HBGuard_LDFLAGS = -fuse-ld=lld
 endif
 
 include $(THEOS_MAKE_PATH)/tweak.mk

@@ -97,37 +97,14 @@ jobs:
           fi
           exit $rc
 
-      # 兜底：如果 -dead_strip_dylibs 没删掉 substrate 依赖，就把它降级成 weak，
-      # 这样在全能签（非越狱，只有裁剪版 libsubstrate）注入时不会 dyld abort
+      # substrate 依赖降级为 weak：全能签（非越狱）环境没有完整 CydiaSubstrate
       - name: Patch substrate dep to weak
-        if: always()
         run: |
+          set -euo pipefail
           set -x
           DYLIB="$(find .theos -name '*.dylib' | head -1)"
-          [ -z "$DYLIB" ] && { echo "no dylib"; exit 1; }
-          python3 - "$DYLIB" <<'PYEOF'
-          import struct, sys, pathlib
-          LC_LOAD_DYLIB = 0xc
-          LC_LOAD_WEAK = 0x80000018
-          p = pathlib.Path(sys.argv[1])
-          d = bytearray(p.read_bytes())
-          if struct.unpack("<I", d[:4])[0] != 0xfeedfacf:
-              print("not arm64 mach-o"); sys.exit(0)
-          ncmds = struct.unpack("<I", d[16:20])[0]
-          off, changed = 32, 0
-          for _ in range(ncmds):
-              cmd, sz = struct.unpack("<II", d[off:off+8])
-              if cmd == LC_LOAD_DYLIB:
-                  no = struct.unpack("<I", d[off+8:off+12])[0]
-                  name = bytes(d[off+no:off+sz]).split(b"\0")[0].decode("utf-8", "replace")
-                  if "ubstrate" in name:
-                      struct.pack_into("<I", d, off, LC_LOAD_WEAK)
-                      print("weakened:", name); changed += 1
-              off += sz
-          if changed:
-              p.write_bytes(d)
-          print("patched", changed)
-          PYEOF
+          test -n "$DYLIB"
+          python3 tools/patch_weak_substrate.py "$DYLIB"
 
       - name: Verify dylib
         if: always()
@@ -137,10 +114,10 @@ jobs:
           [ -z "$DYLIB" ] && exit 1
           echo "===== file ====="
           file "$DYLIB"
-          echo "===== 依赖（重点看 substrate 是否消失或 weak） ====="
+          echo "===== 依赖（substrate 必须是 weak） ====="
           (llvm-otool -L "$DYLIB" 2>/dev/null || llvm-objdump --macho --dylibs-used "$DYLIB" 2>/dev/null) || true
-          echo "===== 导出符号 ====="
-          (llvm-nm -gU "$DYLIB" 2>/dev/null | head -30) || true
+          echo "===== 自检：substrate 是否还是硬链接 ====="
+          python3 tools/patch_weak_substrate.py "$DYLIB" || true
           echo "===== 大小 ====="
           ls -la "$DYLIB"; sha256sum "$DYLIB"
 
@@ -175,52 +152,18 @@ jobs:
       - name: List
         run: find dist -type f -exec ls -la {} \;
 
-      # 用 gh CLI 的 --clobber 覆盖同名 asset：
-      # softprops/action-gh-release 更新已有 release 时会去删旧 asset，返回 404 直接失败
       - name: Publish rolling release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           set -x
           DYLIB="$(find dist -name '*.dylib' | head -1)"
-          echo "dylib=$DYLIB"
-          [ -z "$DYLIB" ] && exit 1
-
+          test -n "$DYLIB"
           gh release view latest >/dev/null 2>&1 || \
             gh release create latest \
               --title "HBGuard latest build" \
               --prerelease \
-              --notes "自动构建产物（arm64），substrate 依赖已降级为 weak，全能签可直接注入。"
-
+              --notes "arm64；substrate 依赖已降级为 weak，全能签可直接注入。"
           gh release upload latest "$DYLIB" --clobber
           gh release view latest
-
-  build-macos:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: macos-13
-    timeout-minutes: 25
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install ldid
-        run: brew install ldid xz >/dev/null 2>&1 || true
-      - name: Setup Theos
-        run: |
-          git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
-          cd "$HOME/theos"
-          git submodule update --init --recursive --depth 1
-          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
-          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
-      - name: Build
-        run: |
-          set -o pipefail
-          make -j4 DEBUG=0 2>&1 | tee /tmp/build-mac.log
-          tail -30 /tmp/build-mac.log
-          find .theos -name "*.dylib" -print
-      - name: Upload dylib
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: HBGuard-dylib-macos
-          path: .theos/obj/**/*.dylib
-          if-no-files-found: warn
