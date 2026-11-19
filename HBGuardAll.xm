@@ -358,8 +358,7 @@ int hbg_hide_target(const char *key, const char *fakePath) {
                                : hbg_basename_is(p, key);
         if (!hit) continue;
 
-        hbg_rename_id_dylib((uint32_t)i, fakePath);
-
+        // 同上：不碰目标 dylib 的 __TEXT（未越狱会因签名失效 SIGBUS）
         if (hbg_rename_image_path((uint32_t)i, fakePath) == 0) {
             done++;
         } else if (hbg_rename_image_basename((uint32_t)i, fakeBase) == 0) {
@@ -671,7 +670,9 @@ static void hbg_hide_self(void) {
         if (!p) continue;
         if (!hbg_basename_is(p, selfBase)) continue;
 
-        hbg_rename_id_dylib((uint32_t)i, "liblzma.dylib");
+        // 绝对不要改自己的 LC_ID_DYLIB：它躺在 HBGuard.dylib 的 __TEXT 里，
+        // 写它 = 代码签名失效，未越狱设备下一次执行该页直接 SIGBUS。
+        // 只改 dyld 堆上维护的路径字符串就够了（_dyld_get_image_name 返回的就是它）。
         if (hbg_rename_image_path((uint32_t)i, kSelfFake) != 0) {
             hbg_rename_image_basename((uint32_t)i, "liblzma.dylib");
         }
