@@ -1,0 +1,70 @@
+name: build
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ldid
+        run: brew install ldid xz || true
+
+      - name: Setup Theos
+        run: |
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+          echo "$HOME/theos/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: |
+          echo "THEOS=$THEOS"
+          xcodebuild -version || true
+          xcrun --sdk iphoneos --show-sdk-version || true
+
+      # 主目标：编译出 dylib（这一步必须成功）
+      - name: Build dylib
+        run: |
+          make clean 2>/dev/null || true
+          make -j$(sysctl -n hw.ncpu) DEBUG=0
+          echo "--- build tree ---"
+          find .theos -name "*.dylib" -o -name "HBGuard" | head -20
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          find .theos -name "HBGuard.dylib" -exec cp {} out/ \; 2>/dev/null || true
+          if [ ! -f out/HBGuard.dylib ]; then
+            find . -name "HBGuard.dylib" -not -path "./out/*" -exec cp {} out/ \; 2>/dev/null || true
+          fi
+          ls -la out/ || true
+          file out/*.dylib 2>/dev/null || true
+
+      # 可选：尝试打 deb（失败不影响 dylib 产物）
+      - name: Try build deb
+        continue-on-error: true
+        run: |
+          make package FINALPACKAGE=1 DEBUG=0 || echo "package skipped (no dpkg-deb)"
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: HBGuard-dylib
+          path: out/*.dylib
+          if-no-files-found: error
+
+      - name: Upload deb
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: HBGuard-deb
+          path: packages/*.deb
+          if-no-files-found: warn

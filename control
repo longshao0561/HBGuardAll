@@ -1,0 +1,9 @@
+﻿Package: com.local.hbguard
+Name: HBGuard
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: 单文件整合版：反检测复刻 + 插件隐藏 + URL 劫持
+Maintainer: local
+Author: local
+Section: Tweaks
+Depends: mobilesubstrate | ellekit
