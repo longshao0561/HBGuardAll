@@ -721,62 +721,6 @@ static void hbg_install_fs_filters(void) {
     hbg_rebind_all(table, (int)(sizeof(table) / sizeof(table[0])));
 }
 
-#pragma mark - ObjC 层枚举过滤
-
-%hook NSBundle
-+ (NSArray *)allFrameworks {
-    NSArray *arr = %orig;
-    if (!HBGHideTargetsEnabled()) return arr;
-    NSMutableArray *out = [NSMutableArray arrayWithCapacity:arr.count];
-    for (NSBundle *b in arr) {
-        const char *p = [b.bundlePath UTF8String];
-        if (hbg_path_hidden(p)) continue;
-        [out addObject:b];
-    }
-    return out;
-}
-+ (NSArray *)allBundles {
-    NSArray *arr = %orig;
-    if (!HBGHideTargetsEnabled()) return arr;
-    NSMutableArray *out = [NSMutableArray arrayWithCapacity:arr.count];
-    for (NSBundle *b in arr) {
-        const char *p = [b.bundlePath UTF8String];
-        if (hbg_path_hidden(p)) continue;
-        [out addObject:b];
-    }
-    return out;
-}
-%end
-
-%hook NSFileManager
-- (BOOL)fileExistsAtPath:(NSString *)path {
-    if (hbg_path_hidden([path UTF8String])) return NO;
-    return %orig;
-}
-- (NSArray *)contentsOfDirectoryAtPath:(NSString *)path error:(NSError **)err {
-    NSArray *arr = %orig;
-    if (!HBGHideTargetsEnabled() || !arr) return arr;
-    NSMutableArray *out = [NSMutableArray arrayWithCapacity:arr.count];
-    for (NSString *name in arr) {
-        if (hbg_name_hidden([name UTF8String])) continue;
-        [out addObject:name];
-    }
-    return out;
-}
-%end
-
-// SDK 可能绕过 NSFileManager 直接读文件，这里把内容读取也拦住
-%hook NSData
-+ (id)dataWithContentsOfFile:(NSString *)path {
-    if (hbg_path_hidden([path UTF8String])) return nil;
-    return %orig;
-}
-- (id)initWithContentsOfFile:(NSString *)path {
-    if (hbg_path_hidden([path UTF8String])) return nil;
-    return %orig;
-}
-%end
-
 #pragma mark - 入口
 
 static void _hbg_ctor_0(void) {
@@ -906,13 +850,6 @@ static id HBEvFilterImageInfo(id info) {
 + (id)proxyInformation          { return HBEvFilterPipe(%orig); }        // 0x6A94
 + (id)dyldImageInfo             { return HBEvFilterImageInfo(%orig); }   // 0x6B60
 
-// 专门检测「自己的方法有没有被别人 hook」的两个方法 —— 必须抹平，
-// 否则 checkMach_O / execFileMd5 的 IMP 被换掉会被它们查出来。
-+ (id)CMethodHookedResult       { return nil; }
-+ (id)OCMethodHookedResult      { return nil; }
-
-// 越狱 App / URL scheme 探测
-+ (BOOL)canOpenPath:(id)p       { return NO; }
 %end
 
 %hook internal_DeviceInfo
@@ -964,22 +901,6 @@ static id HBEvFilterImageInfo(id info) {
     return t.length ? t : nil;
 }
 
-// 下面这批返回 void（v16@0:8），检测结果通过属性 / block 回传。
-// 空实现 = 不写入结果 = 保持「无异常」。不碰 hook / collectData / isCharge（正常功能）。
-- (void)isJailbreak              { }
-- (void)isJailbreakV2            { }
-- (void)isDebuggerAttached       { }
-- (void)isDebuggerAttachedV2     { }
-- (void)isSimulator              { }
-- (void)dyldList                 { }
-- (void)fetchDyldLibraries       { }
-- (void)checkProxy               { }
-- (void)checkProxyV2             { }
-- (void)checkSign                { }
-- (void)checkMethodHooked        { }
-- (void)checkOCMethodHooked      { }
-- (void)dyldInfo                 { }
-- (void)dyldAllInfo              { }
 %end
 
 %end // INTEG
@@ -1450,188 +1371,6 @@ static NSMutableURLRequest *UHDHijack(NSURLRequest *request) {
 
 %end
 
-/* ==================== Coverage.xm ==================== */
-//
-//  Coverage.xm
-//  按 selector 名全类扫描补漏（选中率靠实测，不靠猜）
-//
-//  2026-11-19 实机 frida 扫描（iPhone 8 Plus / iOS 16.7.16 / 60096 个类）得到 86 个检测方法，
-//  这里按实测结果补全，并修了两个致命问题：
-//    1) SPCheckInfo 的 isJailbreak/isJailbreakV2/isDebuggerAttached/isDebuggerAttachedV2/isSimulator
-//       返回类型是 v(void)，不是 BOOL —— 只按 'c'/'B' 判断会整族漏掉
-//    2) isProxy / isDebugging 在系统类里也有（NSProxy、AVAsset、RBSProcessState…），
-//       盲目按名字改会打坏系统 —— 所以只处理主 App 镜像里的类
-//
-
-#pragma mark - 名单（实测）
-
-// 返回 BOOL / char / short
-static const char *kBoolSelectors[] = {
-    // 越狱（实测挂在 UIDevice / TBRestUtils / ANX* 等多个类上）
-    "isJailBroken", "isJailBreak", "isJailbreak", "isJailbroken",
-    "isJailBreakV2", "isJailbreakV2",
-    "hasJailbreakApps", "hasJailbreakPort", "hasWritePermissionInRoot", "canOpenApplication",
-    "apf_isJailBroken", "dogger_isJailbroken", "elm_isJailBroken",
-    "eps_isJailBroken", "hbf_isJailBroken",
-    // 调试
-    "isDebuggerAttached", "isDebuggerAttachedV2", "isDebugable", "isDebugging",
-    // 模拟器
-    "isSimulator", "isEmulator", "isSimulatedBySoftware",
-    "elm_isSimulator", "mus_isSimulator",
-    // 网络环境（isProxy 太通用，故意不放）
-    "isVpnOn",
-    NULL
-};
-
-// 返回 void 的「检测并上报」型（实测 SPCheckInfo 一族）
-static const char *kVoidSelectors[] = {
-    "isJailbreak", "isJailbreakV2",
-    "isDebuggerAttached", "isDebuggerAttachedV2",
-    "isSimulator",
-    "reportIsJailBrokenDeviceOnce",
-    NULL
-};
-
-// 返回对象的
-// 注意：getCodeSignInfo 交给 Integrity.xm 的 %hook 处理（它能返回原版 Team ID），
-// 这里不要重复接管，否则谁后跑谁生效，结果不确定。
-static const char *kObjectSelectors[] = {
-    "getSimulatorDetectComp",
-    "mobileprovision",
-    "embeddedMobileProvision",
-    NULL
-};
-
-// checkJB 单独处理：样本返回的是字符串 "0"，不是 nil
-static const char *kZeroStringSelectors[] = { "checkJB", NULL };
-
-#pragma mark - 替换实现
-
-static BOOL hbg_ret_no(id self, SEL _cmd)   { return NO; }
-static void hbg_ret_void(id self, SEL _cmd) { }
-static id   hbg_ret_nil(id self, SEL _cmd)  { return nil; }
-static id   hbg_ret_zero(id self, SEL _cmd) { return @"0"; }
-
-static BOOL hbg_in_list(const char *name, const char **list) {
-    for (int i = 0; list[i]; i++) {
-        if (strcmp(name, list[i]) == 0) return YES;
-    }
-    return NO;
-}
-
-// 只处理主 App 镜像里的类：系统类里的 isProxy / isDebugging 绝对不能碰
-static BOOL hbg_is_app_class(Class cls) {
-    const char *img = class_getImageName(cls);
-    const char *mainImg = _dyld_get_image_name(0);
-    if (!img || !mainImg) return NO;
-    return strcmp(img, mainImg) == 0;
-}
-
-#pragma mark - 扫描
-
-static int hbg_scan_and_patch(void) {
-    int count = objc_getClassList(NULL, 0);
-    if (count <= 0) return 0;
-
-    Class *classes = (Class *)malloc(sizeof(Class) * count);
-    if (!classes) return 0;
-    count = objc_getClassList(classes, count);
-
-    int patched = 0, skippedSys = 0;
-    for (int i = 0; i < count; i++) {
-        Class cls = classes[i];
-        if (!hbg_is_app_class(cls)) { skippedSys++; continue; }
-
-        for (int meta = 0; meta < 2; meta++) {
-            Class target = meta ? object_getClass(cls) : cls;
-            if (!target) continue;
-
-            unsigned int mcount = 0;
-            Method *methods = class_copyMethodList(target, &mcount);
-            if (!methods) continue;
-
-            for (unsigned int j = 0; j < mcount; j++) {
-                const char *name  = sel_getName(method_getName(methods[j]));
-                const char *types = method_getTypeEncoding(methods[j]);
-                if (!name || !types) continue;
-
-                char ret = types[0];
-
-                if (hbg_in_list(name, kZeroStringSelectors)) {
-                    method_setImplementation(methods[j], (IMP)hbg_ret_zero);
-                    patched++;
-                } else if (ret == 'v' && hbg_in_list(name, kVoidSelectors)) {
-                    method_setImplementation(methods[j], (IMP)hbg_ret_void);
-                    patched++;
-                } else if ((ret == 'c' || ret == 'B' || ret == 'S') &&
-                           hbg_in_list(name, kBoolSelectors)) {
-                    method_setImplementation(methods[j], (IMP)hbg_ret_no);
-                    patched++;
-                } else if (ret == '@' && hbg_in_list(name, kObjectSelectors)) {
-                    method_setImplementation(methods[j], (IMP)hbg_ret_nil);
-                    patched++;
-                }
-            }
-            free(methods);
-        }
-    }
-    free(classes);
-    NSLog(@"[HBGuard] coverage patched=%d skippedSystemClasses=%d", patched, skippedSys);
-    return patched;
-}
-
-#pragma mark - UA 兜底：IsJailbroken/1 → /0
-
-static NSString *hbg_fix_ua(NSString *ua) {
-    if (![ua isKindOfClass:[NSString class]]) return ua;
-    if ([ua rangeOfString:@"IsJailbroken/"].location == NSNotFound) return ua;
-    NSMutableString *m = [ua mutableCopy];
-    [m replaceOccurrencesOfString:@"IsJailbroken/1"
-                       withString:@"IsJailbroken/0"
-                          options:0
-                            range:NSMakeRange(0, m.length)];
-    return m;
-}
-
-%hook NSMutableURLRequest
-- (void)setValue:(NSString *)value forHTTPHeaderField:(NSString *)field {
-    if (field && value && [field caseInsensitiveCompare:@"User-Agent"] == NSOrderedSame) {
-        value = hbg_fix_ua(value);
-    }
-    %orig;
-}
-- (void)setAllHTTPHeaderFields:(NSDictionary<NSString *, NSString *> *)map {
-    if (map[@"User-Agent"]) {
-        NSMutableDictionary *d = [map mutableCopy];
-        d[@"User-Agent"] = hbg_fix_ua(map[@"User-Agent"]);
-        %orig(d);
-        return;
-    }
-    %orig;
-}
-%end
-
-%hook NSURLSessionConfiguration
-- (void)setHTTPAdditionalHeaders:(NSDictionary *)headers {
-    if (headers[@"User-Agent"]) {
-        NSMutableDictionary *d = [headers mutableCopy];
-        d[@"User-Agent"] = hbg_fix_ua(headers[@"User-Agent"]);
-        %orig(d);
-        return;
-    }
-    %orig;
-}
-%end
-
-#pragma mark - 入口
-
-static void _hbg_ctor_2(void) {
-    @autoreleasepool {
-        if (!HBGEnabled() || !HBGCoverageEnabled()) return;
-        hbg_scan_and_patch();
-    }
-}
-
 
 /* ---- 单入口：按 隐藏 -> hook -> 补漏 的顺序执行 ---- */
 %ctor {
@@ -1639,6 +1378,5 @@ static void _hbg_ctor_2(void) {
         %init(_ungrouped);
         _hbg_ctor_0();
         _hbg_ctor_1();
-        _hbg_ctor_2();
     }
 }
