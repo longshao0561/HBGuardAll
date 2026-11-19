@@ -35,6 +35,12 @@ jobs:
         run: |
           set -x
           git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          cd "$HOME/theos"
+          # Logos 生成的代码要 #include <substrate.h>，它在 vendor/ 子模块里
+          git submodule update --init --recursive --depth 1
+          echo "--- vendor ---"
+          ls vendor/ 2>/dev/null || echo "vendor MISSING"
+          ls vendor/include/substrate.h 2>/dev/null || echo "substrate.h MISSING"
           test -d "$HOME/theos/makefiles" && echo "theos OK"
 
       - name: Fetch single iOS SDK (sparse)
