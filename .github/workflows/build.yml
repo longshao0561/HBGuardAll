@@ -10,10 +10,9 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write        # Release 上传需要
+  contents: write
 
 jobs:
-  # 主力：Linux runner，秒开
   build-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -98,30 +97,52 @@ jobs:
           fi
           exit $rc
 
-      # 产物验证：架构 / 依赖 / 导出符号
+      # 兜底：如果 -dead_strip_dylibs 没删掉 substrate 依赖，就把它降级成 weak，
+      # 这样在全能签（非越狱，只有裁剪版 libsubstrate）注入时不会 dyld abort
+      - name: Patch substrate dep to weak
+        if: always()
+        run: |
+          set -x
+          DYLIB="$(find .theos -name '*.dylib' | head -1)"
+          [ -z "$DYLIB" ] && { echo "no dylib"; exit 1; }
+          python3 - "$DYLIB" <<'PYEOF'
+          import struct, sys, pathlib
+          LC_LOAD_DYLIB = 0xc
+          LC_LOAD_WEAK = 0x80000018
+          p = pathlib.Path(sys.argv[1])
+          d = bytearray(p.read_bytes())
+          if struct.unpack("<I", d[:4])[0] != 0xfeedfacf:
+              print("not arm64 mach-o"); sys.exit(0)
+          ncmds = struct.unpack("<I", d[16:20])[0]
+          off, changed = 32, 0
+          for _ in range(ncmds):
+              cmd, sz = struct.unpack("<II", d[off:off+8])
+              if cmd == LC_LOAD_DYLIB:
+                  no = struct.unpack("<I", d[off+8:off+12])[0]
+                  name = bytes(d[off+no:off+sz]).split(b"\0")[0].decode("utf-8", "replace")
+                  if "ubstrate" in name:
+                      struct.pack_into("<I", d, off, LC_LOAD_WEAK)
+                      print("weakened:", name); changed += 1
+              off += sz
+          if changed:
+              p.write_bytes(d)
+          print("patched", changed)
+          PYEOF
+
       - name: Verify dylib
         if: always()
         run: |
           set -x
           DYLIB="$(find .theos -name '*.dylib' | head -1)"
-          echo "dylib=$DYLIB"
           [ -z "$DYLIB" ] && exit 1
-
           echo "===== file ====="
           file "$DYLIB"
-
-          echo "===== 架构 ====="
-          llvm-objdump --macho --private-headers "$DYLIB" 2>/dev/null | grep -E 'cputype|cpusubtype|MH_DYLIB' || true
-
-          echo "===== 依赖 (otool -L) ====="
+          echo "===== 依赖（重点看 substrate 是否消失或 weak） ====="
           (llvm-otool -L "$DYLIB" 2>/dev/null || llvm-objdump --macho --dylibs-used "$DYLIB" 2>/dev/null) || true
-
-          echo "===== 导出符号 (nm -gU 近似) ====="
-          (llvm-nm -gU "$DYLIB" 2>/dev/null | head -60) || true
-
+          echo "===== 导出符号 ====="
+          (llvm-nm -gU "$DYLIB" 2>/dev/null | head -30) || true
           echo "===== 大小 ====="
-          ls -la "$DYLIB"
-          sha256sum "$DYLIB"
+          ls -la "$DYLIB"; sha256sum "$DYLIB"
 
       - name: Upload dylib
         if: always()
@@ -139,7 +160,6 @@ jobs:
           path: /tmp/build.log
           if-no-files-found: warn
 
-  # 免登录下载：把 dylib 挂到 release（artifact 要登录，release 附件不用）
   release:
     needs: build-linux
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
@@ -159,28 +179,23 @@ jobs:
           tag_name: latest
           name: HBGuard latest build
           body: |
-            自动构建产物（arm64）。
+            自动构建产物（arm64，substrate 依赖已降级为 weak，全能签可直接用）。
 
             - 提交：${{ github.sha }}
             - 时间：${{ github.event.head_commit.timestamp }}
-            - 直接下载 dylib 注入进 IPA 即可
           files: dist/**/*.dylib
           prerelease: true
           make_latest: false
 
-  # macOS 兜底：只在手动触发时跑（排队太慢，不占日常 CI）
   build-macos:
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-13
     timeout-minutes: 25
     continue-on-error: true
-
     steps:
       - uses: actions/checkout@v4
-
       - name: Install ldid
         run: brew install ldid xz >/dev/null 2>&1 || true
-
       - name: Setup Theos
         run: |
           git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
@@ -188,15 +203,12 @@ jobs:
           git submodule update --init --recursive --depth 1
           echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
           echo "$HOME/theos/bin" >> "$GITHUB_PATH"
-          xcrun --sdk iphoneos --show-sdk-path || true
-
       - name: Build
         run: |
           set -o pipefail
           make -j4 DEBUG=0 2>&1 | tee /tmp/build-mac.log
           tail -30 /tmp/build-mac.log
           find .theos -name "*.dylib" -print
-
       - name: Upload dylib
         if: always()
         uses: actions/upload-artifact@v4
