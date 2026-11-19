@@ -76,6 +76,9 @@ NSString *HBGOriginAppIdentifier(void);
 /// 模拟器 / 定位来源抹除（installHideSimHooks 等价实现），默认 YES
 BOOL HBGSimHideEnabled(void);
 
+/// 跨镜像重绑 readdir/access（改 __DATA 里的间接符号指针），默认 NO
+BOOL HBGRebindEnabled(void);
+
 /// 写配置（也可以用 defaults 命令从外部改）
 void HBGSetBool(NSString *key, BOOL value);
 
@@ -109,6 +112,10 @@ BOOL HBGIntegrityEnabled(void)     { return HBGBool(CFSTR("integrity"),     YES)
 // Coverage 是「插件没覆盖到的那批」的额外补漏，会改变插件原本的行为面。
 BOOL HBGCoverageEnabled(void)      { return HBGBool(CFSTR("coverage"),      NO); }
 BOOL HBGSimHideEnabled(void)       { return HBGBool(CFSTR("simHide"),      YES); }
+// 默认关：跨镜像改 __DATA 里的间接符号指针风险最高（写错一个地址就启动崩），
+// 而文件访问面已经有 NSFileManager / NSData 的 ObjC hook 覆盖。
+// 确认环境稳定后可用 defaults write com.local.hbguard rebind -bool YES 打开。
+BOOL HBGRebindEnabled(void)        { return HBGBool(CFSTR("rebind"),       NO); }
 
 // 重打包后主程序哈希必变，这个值必须固定。
 // 默认取样本里现场解密出来的常量：e4d330c15021d53a959aca760dbb845e
@@ -396,11 +403,24 @@ int hbg_rebind_one(const char *name, void *repl, void **orig);
 
 /* ==================== Support/HBGRebind.c ==================== */
 //
-//  HBGRebind.c
+//  HBGRebind.c —— 跨镜像重绑 readdir/access 的间接符号指针
+//
+//  关键点（第一版写错导致启动崩溃）：
+//   1. Mach-O 里 section.offset / symtab.symoff 是「文件偏移」，
+//      而 dyld 映射后段之间还有页对齐填充，vmaddr != fileoff。
+//      必须用 vmaddr 计算地址：img_base = mh - __TEXT.vmaddr，ptr = img_base + sec->addr
+//   2. iOS 15+ 的 __DATA_CONST 是 chained fixups 段，里面不是裸指针，
+//      直接把绝对地址写进去会破坏链，dyld 解链时崩。这里只碰 __DATA。
 //
 
 
 
+#ifndef S_LAZY_SYMBOL_POINTERS
+#define S_LAZY_SYMBOL_POINTERS 0x7
+#endif
+#ifndef S_NON_LAZY_SYMBOL_POINTERS
+#define S_NON_LAZY_SYMBOL_POINTERS 0x6
+#endif
 #ifndef INDIRECT_SYMBOL_LOCAL
 #define INDIRECT_SYMBOL_LOCAL 0x80000000
 #endif
@@ -408,70 +428,100 @@ int hbg_rebind_one(const char *name, void *repl, void **orig);
 #define INDIRECT_SYMBOL_ABS   0x40000000
 #endif
 #ifndef SECTION_TYPE
-#define SECTION_TYPE       0x000000ff
+#define SECTION_TYPE          0x000000ff
 #endif
 
-/// 单个镜像内的重绑
+/// 取 __TEXT 的 vmaddr（dylib/可执行文件通常是 0，但不能假设）
+static uint64_t text_vmaddr(const struct mach_header_64 *mh) {
+    const struct load_command *lc = (const struct load_command *)(mh + 1);
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
+            if (strcmp(sg->segname, "__TEXT") == 0) return sg->vmaddr;
+        }
+        lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+    }
+    return 0;
+}
+
+/// 单个镜像内的重绑。返回命中数。
 static int rebind_image(const struct mach_header_64 *mh,
                         struct hbg_rebind *items, int count) {
     const struct symtab_command   *symtab = NULL;
     const struct dysymtab_command *dysym  = NULL;
+    bool has_chained = false;
 
     const struct load_command *lc = (const struct load_command *)(mh + 1);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
-        if (lc->cmd == LC_SYMTAB)         symtab = (const struct symtab_command *)lc;
-        else if (lc->cmd == LC_DYSYMTAB)  dysym  = (const struct dysymtab_command *)lc;
+        switch (lc->cmd) {
+            case LC_SYMTAB:  symtab = (const struct symtab_command *)lc; break;
+            case LC_DYSYMTAB: dysym = (const struct dysymtab_command *)lc; break;
+#ifdef LC_DYLD_CHAINED_FIXUPS
+            case LC_DYLD_CHAINED_FIXUPS: has_chained = true; break;
+#endif
+            default: break;
+        }
         lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
     }
     if (!symtab || !dysym) return 0;
     if (symtab->nsyms == 0 || dysym->nindirectsyms == 0) return 0;
 
-    const struct nlist_64 *syms = (const struct nlist_64 *)((const char *)mh + symtab->symoff);
-    const char            *strs = (const char *)mh + symtab->stroff;
-    const uint32_t        *ind  = (const uint32_t *)((const char *)mh + dysym->indirectsymoff);
+    // chained fixups 的镜像：符号表偏移可能不在传统位置，直接跳过，避免写坏
+    if (has_chained) return 0;
+
+    const uint64_t tvm = text_vmaddr(mh);
+    const uint8_t *img = (const uint8_t *)mh - tvm;   // img + vmaddr = 内存地址
+
+    // 文件偏移 -> 内存地址 的换算：对 __TEXT 段，vmaddr 与 fileoff 的差是常量 delta
+    const uint64_t delta = tvm;    // __TEXT.fileoff 恒为 0
+
+    const struct nlist_64 *syms = (const struct nlist_64 *)(img + symtab->symoff + delta);
+    const char            *strs = (const char *)(img + symtab->stroff + delta);
+    const uint32_t        *ind  = (const uint32_t *)(img + dysym->indirectsymoff + delta);
 
     int hits = 0;
     lc = (const struct load_command *)(mh + 1);
     for (uint32_t i = 0; i < mh->ncmds; i++) {
-        if (lc->cmd != LC_SEGMENT_64) {
-            lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-            continue;
-        }
-        const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
-        if (strcmp(sg->segname, "__DATA") != 0 &&
-            strcmp(sg->segname, "__DATA_CONST") != 0) {
-            lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-            continue;
-        }
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg = (const struct segment_command_64 *)lc;
+            // 只处理 __DATA：__DATA_CONST 是 chained fixups，不能当裸指针写
+            if (strcmp(sg->segname, "__DATA") == 0) {
+                const struct section_64 *sec = (const struct section_64 *)(sg + 1);
+                for (uint32_t s = 0; s < sg->nsects; s++, sec++) {
+                    uint32_t type = sec->flags & SECTION_TYPE;
+                    if (type != S_LAZY_SYMBOL_POINTERS &&
+                        type != S_NON_LAZY_SYMBOL_POINTERS) continue;
+                    if (sec->size == 0) continue;
+                    if (sec->addr < tvm) continue;         // 越界保护
 
-        const struct section_64 *sec = (const struct section_64 *)(sg + 1);
-        for (uint32_t s = 0; s < sg->nsects; s++, sec++) {
-            uint32_t type = sec->flags & SECTION_TYPE;
-            if (type != S_LAZY_SYMBOL_POINTERS &&
-                type != S_NON_LAZY_SYMBOL_POINTERS) continue;
+                    void   **ptrs = (void **)(img + sec->addr);
+                    uint32_t cnt  = (uint32_t)(sec->size / sizeof(void *));
 
-            void       **ptrs = (void **)((char *)mh + sec->offset);
-            uint32_t     cnt  = (uint32_t)(sec->size / sizeof(void *));
+                    for (uint32_t j = 0; j < cnt; j++) {
+                        uint32_t ii = sec->reserved1 + j;
+                        if (ii >= dysym->nindirectsyms) break;
+                        uint32_t idx = ind[ii];
+                        if (idx == INDIRECT_SYMBOL_LOCAL || idx == INDIRECT_SYMBOL_ABS) continue;
+                        if (idx >= symtab->nsyms) continue;
 
-            for (uint32_t j = 0; j < cnt; j++) {
-                if (sec->reserved1 + j >= dysym->nindirectsyms) break;
-                uint32_t idx = ind[sec->reserved1 + j];
-                if (idx == INDIRECT_SYMBOL_LOCAL || idx == INDIRECT_SYMBOL_ABS) continue;
-                if (idx >= symtab->nsyms) continue;
+                        uint32_t strx = syms[idx].n_un.n_strx;
+                        if (strx == 0 || strx >= symtab->strsize) continue;
+                        const char *nm = strs + strx;
 
-                const char *nm = strs + syms[idx].n_un.n_strx;
-                for (int k = 0; k < count; k++) {
-                    const char *want = items[k].name;
-                    bool match = (strcmp(nm, want) == 0);
-                    if (!match && nm[0] == '_' && strcmp(nm + 1, want) == 0) match = true;
-                    if (!match) continue;
+                        for (int k = 0; k < count; k++) {
+                            const char *want = items[k].name;
+                            bool match = (strcmp(nm, want) == 0);
+                            if (!match && nm[0] == '_' && strcmp(nm + 1, want) == 0) match = true;
+                            if (!match) continue;
 
-                    if (items[k].orig && *items[k].orig == NULL) {
-                        *items[k].orig = ptrs[j];
-                    }
-                    if (hbg_make_writable(&ptrs[j], sizeof(void *)) == 0) {
-                        ptrs[j] = items[k].repl;
-                        hits++;
+                            if (items[k].orig && *items[k].orig == NULL) {
+                                *items[k].orig = ptrs[j];
+                            }
+                            if (hbg_make_writable(&ptrs[j], sizeof(void *)) == 0) {
+                                ptrs[j] = items[k].repl;
+                                hits++;
+                            }
+                        }
                     }
                 }
             }
@@ -485,6 +535,7 @@ int hbg_rebind_all(struct hbg_rebind *items, int count) {
     if (!items || count <= 0) return 0;
     int total = 0;
     int n = hbg_image_count();
+    if (n > 2000) n = 2000;          // 异常保护
     for (int i = 0; i < n; i++) {
         const struct mach_header_64 *mh = hbg_image_header(i);
         if (!mh) continue;
@@ -732,13 +783,23 @@ static void _hbg_ctor_0(void) {
     @autoreleasepool {
         if (!HBGEnabled()) return;
 
-        hbg_hide_self();                 // 先把自己藏了
-        hbg_hide_all_targets();          // 再把目标插件一起藏了
-        hbg_install_fs_filters();        // 文件系统枚举也抹掉
+        // 延迟 1 秒再改 dyld/镜像内存：启动最早期动这些最容易把 App 直接带走，
+        // 而且此时 dyld 已完成加载、内存布局稳定。
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @autoreleasepool {
+                hbg_hide_self();                 // 先把自己藏了
+                hbg_hide_all_targets();          // 再把目标插件一起藏了
 
-        if (HBGHideOfficialEnabled()) {
-            NSLog(@"[HBGuard] hideOfficial=ON —— 官方 SDK 也被改名，注意 Unicorn 自校验");
-        }
+                if (HBGRebindEnabled()) {
+                    hbg_install_fs_filters();    // 文件系统层过滤（默认关，风险最高）
+                }
+                if (HBGHideOfficialEnabled()) {
+                    NSLog(@"[HBGuard] hideOfficial=ON —— 官方 SDK 也被改名，注意 Unicorn 自校验");
+                }
+                NSLog(@"[HBGuard] hide done, rebind=%d", HBGRebindEnabled());
+            }
+        });
     }
 }
 
