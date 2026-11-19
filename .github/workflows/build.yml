@@ -164,6 +164,8 @@ jobs:
     needs: build-linux
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -173,19 +175,25 @@ jobs:
       - name: List
         run: find dist -type f -exec ls -la {} \;
 
+      # 用 gh CLI 的 --clobber 覆盖同名 asset：
+      # softprops/action-gh-release 更新已有 release 时会去删旧 asset，返回 404 直接失败
       - name: Publish rolling release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: HBGuard latest build
-          body: |
-            自动构建产物（arm64，substrate 依赖已降级为 weak，全能签可直接用）。
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          DYLIB="$(find dist -name '*.dylib' | head -1)"
+          echo "dylib=$DYLIB"
+          [ -z "$DYLIB" ] && exit 1
 
-            - 提交：${{ github.sha }}
-            - 时间：${{ github.event.head_commit.timestamp }}
-          files: dist/**/*.dylib
-          prerelease: true
-          make_latest: false
+          gh release view latest >/dev/null 2>&1 || \
+            gh release create latest \
+              --title "HBGuard latest build" \
+              --prerelease \
+              --notes "自动构建产物（arm64），substrate 依赖已降级为 weak，全能签可直接注入。"
+
+          gh release upload latest "$DYLIB" --clobber
+          gh release view latest
 
   build-macos:
     if: github.event_name == 'workflow_dispatch'
