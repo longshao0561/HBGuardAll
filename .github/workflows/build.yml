@@ -9,8 +9,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: write        # Release 上传需要
+
 jobs:
-  # Linux 优先：runner 秒开
+  # 主力：Linux runner，秒开
   build-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -29,7 +32,6 @@ jobs:
               && sudo install -m755 /tmp/ldid /usr/local/bin/ldid
           fi
           ldid -v 2>/dev/null || true
-          command -v llvm-strip || find /usr -name 'llvm-strip*' 2>/dev/null | head -3
           clang --version | head -1
 
       - name: Clone Theos
@@ -39,7 +41,6 @@ jobs:
           cd "$HOME/theos"
           git submodule update --init --recursive --depth 1
           ls vendor/include/substrate.h && echo "substrate.h OK"
-          test -d "$HOME/theos/makefiles" && echo "theos OK"
 
       - name: Linux toolchain shim
         run: |
@@ -49,7 +50,6 @@ jobs:
           ln -sf "$(command -v clang)"   "$TC/clang"
           ln -sf "$(command -v clang++)" "$TC/clang++"
           LD64="$(command -v ld64.lld || find /usr -name 'ld64.lld' 2>/dev/null | head -1)"
-          echo "ld64=$LD64"
           if [ -n "$LD64" ]; then
             ln -sf "$LD64" "$TC/ld64"
             sudo ln -sf "$LD64" /usr/local/bin/ld64.lld
@@ -58,9 +58,8 @@ jobs:
           LDID="$(command -v ldid || true)"
           [ -n "$LDID" ] && ln -sf "$LDID" "$TC/ldid"
           STRIP="$(command -v llvm-strip || find /usr -name 'llvm-strip*' 2>/dev/null | head -1)"
-          echo "strip=$STRIP"
           [ -n "$STRIP" ] && ln -sf "$STRIP" "$TC/strip"
-          for t in llvm-objcopy llvm-otool llvm-nm; do
+          for t in llvm-objcopy llvm-nm llvm-objdump; do
             p="$(command -v $t || find /usr -name "$t*" 2>/dev/null | head -1)"
             [ -n "$p" ] && ln -sf "$p" "$TC/${t#llvm-}"
           done
@@ -79,7 +78,6 @@ jobs:
           printf '%s/*\n' "$SDK" > .git/info/sparse-checkout
           git fetch --depth 1 --filter=blob:none origin master
           git checkout -q FETCH_HEAD
-          du -sh "$HOME/theos/sdks/$SDK" || true
           test -d "$HOME/theos/sdks/$SDK" && echo "SDK OK"
 
       - name: Build
@@ -87,24 +85,43 @@ jobs:
           set -x
           export THEOS="$HOME/theos"
           export PATH="$THEOS/bin:$PATH"
-          echo "THEOS=$THEOS"
 
           set +e
           make -j4 DEBUG=0 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
           echo "make exit code = $rc"
-
-          echo "===== tail ====="
           tail -40 /tmp/build.log
-
           if [ $rc -ne 0 ]; then
             tail -25 /tmp/build.log | while IFS= read -r line; do
               [ -n "$line" ] && echo "::error title=build::$line"
             done
           fi
-
-          find .theos -name "*.dylib" -print -exec file {} \; 2>/dev/null || true
           exit $rc
+
+      # 产物验证：架构 / 依赖 / 导出符号
+      - name: Verify dylib
+        if: always()
+        run: |
+          set -x
+          DYLIB="$(find .theos -name '*.dylib' | head -1)"
+          echo "dylib=$DYLIB"
+          [ -z "$DYLIB" ] && exit 1
+
+          echo "===== file ====="
+          file "$DYLIB"
+
+          echo "===== 架构 ====="
+          llvm-objdump --macho --private-headers "$DYLIB" 2>/dev/null | grep -E 'cputype|cpusubtype|MH_DYLIB' || true
+
+          echo "===== 依赖 (otool -L) ====="
+          (llvm-otool -L "$DYLIB" 2>/dev/null || llvm-objdump --macho --dylibs-used "$DYLIB" 2>/dev/null) || true
+
+          echo "===== 导出符号 (nm -gU 近似) ====="
+          (llvm-nm -gU "$DYLIB" 2>/dev/null | head -60) || true
+
+          echo "===== 大小 ====="
+          ls -la "$DYLIB"
+          sha256sum "$DYLIB"
 
       - name: Upload dylib
         if: always()
@@ -122,8 +139,38 @@ jobs:
           path: /tmp/build.log
           if-no-files-found: warn
 
-  # macOS 兜底
+  # 免登录下载：把 dylib 挂到 release（artifact 要登录，release 附件不用）
+  release:
+    needs: build-linux
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: HBGuard-dylib-linux
+          path: dist
+
+      - name: List
+        run: find dist -type f -exec ls -la {} \;
+
+      - name: Publish rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: HBGuard latest build
+          body: |
+            自动构建产物（arm64）。
+
+            - 提交：${{ github.sha }}
+            - 时间：${{ github.event.head_commit.timestamp }}
+            - 直接下载 dylib 注入进 IPA 即可
+          files: dist/**/*.dylib
+          prerelease: true
+          make_latest: false
+
+  # macOS 兜底：只在手动触发时跑（排队太慢，不占日常 CI）
   build-macos:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: macos-13
     timeout-minutes: 25
     continue-on-error: true
