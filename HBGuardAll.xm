@@ -1538,6 +1538,7 @@ static void _hbg_ctor_2(void) {
 /* ---- 单入口：按 隐藏 -> hook -> 补漏 的顺序执行 ---- */
 %ctor {
     @autoreleasepool {
+        %init(_ungrouped);
         _hbg_ctor_0();
         _hbg_ctor_1();
         _hbg_ctor_2();

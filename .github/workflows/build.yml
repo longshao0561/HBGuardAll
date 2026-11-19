@@ -43,6 +43,21 @@ jobs:
           ls vendor/include/substrate.h 2>/dev/null || echo "substrate.h MISSING"
           test -d "$HOME/theos/makefiles" && echo "theos OK"
 
+      - name: Linux toolchain shim
+        run: |
+          set -x
+          TC="$HOME/theos/toolchain/linux/iphone/bin"
+          mkdir -p "$TC"
+          ln -sf "$(command -v clang)"   "$TC/clang"
+          ln -sf "$(command -v clang++)" "$TC/clang++"
+          LD64="$(command -v ld64.lld || find /usr -name 'ld64.lld' 2>/dev/null | head -1)"
+          echo "ld64=$LD64"
+          [ -n "$LD64" ] && ln -sf "$LD64" "$TC/ld64"
+          LDID="$(command -v ldid || true)"
+          [ -n "$LDID" ] && ln -sf "$LDID" "$TC/ldid"
+          ls -la "$TC"
+          "$TC/clang" --version | head -1 || true
+
       - name: Fetch single iOS SDK (sparse)
         run: |
           set -o pipefail
