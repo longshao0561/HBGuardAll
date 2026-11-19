@@ -155,15 +155,32 @@ jobs:
       - name: Publish rolling release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
         run: |
-          set -euo pipefail
-          set -x
+          set -uo pipefail
           DYLIB="$(find dist -name '*.dylib' | head -1)"
-          test -n "$DYLIB"
-          gh release view latest >/dev/null 2>&1 || \
-            gh release create latest \
+          echo "dylib=$DYLIB"
+          test -n "$DYLIB" || { echo "::error::no dylib found"; exit 1; }
+
+          # 1) 确保 release 存在
+          if ! gh release view latest --repo "$REPO" >/dev/null 2>&1; then
+            gh release create latest --repo "$REPO" \
               --title "HBGuard latest build" \
               --prerelease \
-              --notes "arm64；substrate 依赖已降级为 weak，全能签可直接注入。"
-          gh release upload latest "$DYLIB" --clobber
-          gh release view latest
+              --notes "arm64；substrate 依赖已降级为 weak，全能签可直接注入。" 2>&1 | tee /tmp/rc.log || {
+                tail -10 /tmp/rc.log | while IFS= read -r l; do echo "::error::create: $l"; done; exit 1; }
+          fi
+
+          # 2) 删掉同名旧 asset（gh release upload --clobber 在这套环境里会失败）
+          IDS="$(gh api "repos/$REPO/releases/tags/latest" --jq '.assets[] | select(.name=="HBGuard.dylib") | .id' 2>/dev/null || true)"
+          for id in $IDS; do
+            echo "delete asset $id"
+            gh api -X DELETE "repos/$REPO/releases/assets/$id" 2>&1 | tee /tmp/del.log || {
+              tail -5 /tmp/del.log | while IFS= read -r l; do echo "::error::delete $id: $l"; done; }
+          done
+
+          # 3) 上传
+          gh release upload latest "$DYLIB" --repo "$REPO" 2>&1 | tee /tmp/up.log || {
+            tail -20 /tmp/up.log | while IFS= read -r l; do echo "::error::upload: $l"; done; exit 1; }
+
+          gh release view latest --repo "$REPO"
