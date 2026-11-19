@@ -118,7 +118,7 @@ static NSString *const kHBGDefaultExecMd5 = @"e4d330c15021d53a959aca760dbb845e";
 
 NSString *HBGExecMd5(void) {
     CFPreferencesAppSynchronize(HBGDomain());
-    CFStringRef v = CFPreferencesCopyAppValue(CFSTR("execMd5"), HBGDomain());
+    CFStringRef v = (CFStringRef)CFPreferencesCopyAppValue(CFSTR("execMd5"), HBGDomain());
     if (v) {
         NSString *s = [(__bridge NSString *)v copy];
         CFRelease(v);
@@ -131,7 +131,7 @@ NSString *HBGExecMd5(void) {
 // 没配就返回 nil —— 样本的做法本来也是 getTeamInfo→"null"、bundleTeamIdentifier→nil。
 static NSString *HBGStringPref(CFStringRef key) {
     CFPreferencesAppSynchronize(HBGDomain());
-    CFStringRef v = CFPreferencesCopyAppValue(key, HBGDomain());
+    CFStringRef v = (CFStringRef)CFPreferencesCopyAppValue(key, HBGDomain());
     if (!v) return nil;
     NSString *s = [(__bridge NSString *)v copy];
     CFRelease(v);
