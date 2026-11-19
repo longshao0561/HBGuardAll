@@ -905,6 +905,14 @@ static id HBEvFilterImageInfo(id info) {
 + (id)dynamicLibList            { return HBEvFilterPipe(%orig); }        // 0x69C8 调 orig + 过滤
 + (id)proxyInformation          { return HBEvFilterPipe(%orig); }        // 0x6A94
 + (id)dyldImageInfo             { return HBEvFilterImageInfo(%orig); }   // 0x6B60
+
+// 专门检测「自己的方法有没有被别人 hook」的两个方法 —— 必须抹平，
+// 否则 checkMach_O / execFileMd5 的 IMP 被换掉会被它们查出来。
++ (id)CMethodHookedResult       { return nil; }
++ (id)OCMethodHookedResult      { return nil; }
+
+// 越狱 App / URL scheme 探测
++ (BOOL)canOpenPath:(id)p       { return NO; }
 %end
 
 %hook internal_DeviceInfo
@@ -955,6 +963,23 @@ static id HBEvFilterImageInfo(id info) {
     NSString *t = HBGOriginTeamId();
     return t.length ? t : nil;
 }
+
+// 下面这批返回 void（v16@0:8），检测结果通过属性 / block 回传。
+// 空实现 = 不写入结果 = 保持「无异常」。不碰 hook / collectData / isCharge（正常功能）。
+- (void)isJailbreak              { }
+- (void)isJailbreakV2            { }
+- (void)isDebuggerAttached       { }
+- (void)isDebuggerAttachedV2     { }
+- (void)isSimulator              { }
+- (void)dyldList                 { }
+- (void)fetchDyldLibraries       { }
+- (void)checkProxy               { }
+- (void)checkProxyV2             { }
+- (void)checkSign                { }
+- (void)checkMethodHooked        { }
+- (void)checkOCMethodHooked      { }
+- (void)dyldInfo                 { }
+- (void)dyldAllInfo              { }
 %end
 
 %end // INTEG
