@@ -55,14 +55,30 @@ jobs:
 
       - name: Build
         run: |
-          set -o pipefail
           set -x
           export THEOS="$HOME/theos"
           export PATH="$THEOS/bin:$PATH"
+          echo "THEOS=$THEOS"
+          ls "$THEOS/makefiles/common.mk" || echo "common.mk MISSING"
+          ls -d "$THEOS"/sdks/*.sdk || echo "no sdk dir"
+
+          set +e
           make -j4 DEBUG=0 2>&1 | tee /tmp/build.log
+          rc=${PIPESTATUS[0]}
+          echo "make exit code = $rc"
+
           echo "===== tail ====="
           tail -40 /tmp/build.log
-          find .theos -name "*.dylib" -print -exec file {} \;
+
+          # 把失败日志转成 annotation —— 匿名 API 可读，方便定位
+          if [ $rc -ne 0 ]; then
+            tail -25 /tmp/build.log | while IFS= read -r line; do
+              [ -n "$line" ] && echo "::error title=build::$line"
+            done
+          fi
+
+          find .theos -name "*.dylib" -print -exec file {} \; 2>/dev/null || true
+          exit $rc
 
       - name: Upload dylib
         if: always()
