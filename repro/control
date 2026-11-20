@@ -1,0 +1,9 @@
+Package: com.trc.repro
+Name: TrafficRulesRepro
+Version: 1.0.0
+Architecture: iphoneos-arm64
+Description: Reproduction skeleton for TrafficRules anti-detection modules
+Maintainer: CTF Lab
+Author: CTF Lab
+Section: Tweaks
+Depends: mobilesubstrate

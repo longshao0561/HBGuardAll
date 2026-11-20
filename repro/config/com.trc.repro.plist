@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Enabled</key>
+    <true/>
+    <key>AllowAnyBundle</key>
+    <false/>
+    <key>TargetBundleID</key>
+    <string>me.ele.ios.LPDCrowdsourceAppStore</string>
+    <key>HideNeedles</key>
+    <array>
+        <string>signinject</string>
+        <string>TrafficRules</string>
+        <string>Substrate</string>
+        <string>Substitute</string>
+        <string>ellekit</string>
+        <string>libhooker</string>
+        <string>TweakInject</string>
+        <string>cynject</string>
+        <string>frida</string>
+        <string>cycript</string>
+        <string>objection</string>
+        <string>/var/jb</string>
+    </array>
+    <key>DropEvents</key>
+    <false/>
+    <key>FakeVersion</key>
+    <string>10.11.2</string>
+    <key>FakeUpgradeURL</key>
+    <string>https://example.com/app/download</string>
+    <key>FakeMD5</key>
+    <string>e4d330c15021d53a959aca760dbb845e</string>
+    <key>SkipChainedImages</key>
+    <true/>
+    <key>PatchDataConst</key>
+    <false/>
+    <key>FakeTeamID</key>
+    <string>HOSTTEAMID</string>
+    <key>FakeBundleID</key>
+    <string>me.ele.ios.LPDCrowdsourceAppStore</string>
+    <key>FakeDeviceModel</key>
+    <string>iPhone15,3</string>
+    <key>RiskScoreCap</key>
+    <integer>0</integer>
+</dict>
+</plist>

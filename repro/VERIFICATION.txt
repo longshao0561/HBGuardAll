@@ -1,0 +1,100 @@
+TrafficRulesRepro verification
+==============================
+
+Environment
+-----------
+host      : Windows / PowerShell
+python    : 3.13.12
+theos     : not installed on this host
+clang     : not installed on this host
+
+1. Source consistency
+---------------------
+command:
+  python tools/check_sources.py
+
+output:
+  root: D:\客户\测试\TrafficRulesRepro
+  files: 12
+  entrypoints: 6
+  rebind symbols: 16
+  RESULT: PASS
+
+2. Original sample untouched
+----------------------------
+command:
+  Get-FileHash "D:\客户\测试\样板\TrafficRules.dylib" -Algorithm SHA256
+
+output:
+  0b33743c7dc38decb90606f96cb0933501982310130774d354ae221bbe37d51a
+
+3. LC_ID_DYLIB patch on a copy
+------------------------------
+command:
+  python tools/patch_macho.py "D:\客户\测试\样板\TrafficRules.dylib" \
+      --set-id TrafficRulesRepro.dylib \
+      --out out/TrafficRulesRepro.dylib
+
+output:
+  old id      : _build/TrafficRules_signinject.dylib
+  new id      : TrafficRulesRepro.dylib
+  capacity    : 40 bytes
+  sha256 in   : 0b33743c7dc38decb90606f96cb0933501982310130774d354ae221bbe37d51a
+  sha256 out  : 55cbc64225c26c4289135d724f371d6770769770475b2792f37ec79635629384
+  verify      : PASS (TrafficRulesRepro.dylib)
+
+4. Patched copy load-command re-read
+------------------------------------
+command:
+  python tools/patch_macho.py out/TrafficRulesRepro.dylib --info
+
+output (selected):
+  size    : 1213296
+  ncmds   : 27 (sizeofcmds=0x10b0)
+  [04] LC_ID_DYLIB          @0xbe0  TrafficRulesRepro.dylib
+  [12] LC_ENCRYPTION_INFO_64@0xcf0  cryptid=0
+
+Notes
+-----
+- out/TrafficRulesRepro.dylib is a renamed copy of the original sample,
+  used only to verify the in-place Mach-O patcher.
+- A real tweak build requires macOS + Theos + iOS SDK:
+    export THEOS=~/theos
+    cd TrafficRulesRepro
+    make clean package
+
+5. Audit corrections (2026-11-20)
+---------------------------------
+selector arity:
+  __objc_methname count(b"canOpenApplication:") = 0
+  __objc_methname count(b"canOpenApplication")  = 1
+  source now contains: TRCZeroClassBool("SPJailbreakSniffer", "canOpenApplication");
+
+digest constant:
+  emulated from 0x8564 with w11=0x69 (prologue carry-in):
+  e4d330c15021d53a959aca760dbb845e
+
+chained fixups:
+  LC_DYLD_CHAINED_FIXUPS present: 1
+  default policy: SkipChainedImages=YES, PatchDataConst=NO
+
+source regression check:
+  command: python tools/check_sources.py
+  output : RESULT: PASS
+
+6. Audit verifier
+-----------------
+command:
+  python tools/verify_audit.py
+
+output:
+  selector canOpenApplication:   0
+  selector canOpenApplication    1
+  LC_DYLD_CHAINED_FIXUPS        1 @ ['0xc20']
+  execFileMd5                    e4d330c15021d53a959aca760dbb845e
+  no canOpenApplication:           PASS
+  digest ends bb845e               PASS
+  chained guard                    PASS
+  text vmaddr subtraction          PASS
+  no void-star load-command cast   PASS
+  RESULT: PASS

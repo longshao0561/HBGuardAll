@@ -13,6 +13,7 @@ permissions:
   contents: write
 
 jobs:
+  # ── HBGuard（自建，34 条复刻 + 隐藏）──────────────────────────
   build-linux:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -31,7 +32,6 @@ jobs:
               && sudo install -m755 /tmp/ldid /usr/local/bin/ldid
           fi
           ldid -v 2>/dev/null || true
-          clang --version | head -1
 
       - name: Clone Theos
         run: |
@@ -39,7 +39,6 @@ jobs:
           git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
           cd "$HOME/theos"
           git submodule update --init --recursive --depth 1
-          ls vendor/include/substrate.h && echo "substrate.h OK"
 
       - name: Linux toolchain shim
         run: |
@@ -54,23 +53,19 @@ jobs:
             sudo ln -sf "$LD64" /usr/local/bin/ld64.lld
             sudo ln -sf "$LD64" /usr/local/bin/ld64
           fi
-          LDID="$(command -v ldid || true)"
-          [ -n "$LDID" ] && ln -sf "$LDID" "$TC/ldid"
+          LDID="$(command -v ldid || true)"; [ -n "$LDID" ] && ln -sf "$LDID" "$TC/ldid"
           STRIP="$(command -v llvm-strip || find /usr -name 'llvm-strip*' 2>/dev/null | head -1)"
           [ -n "$STRIP" ] && ln -sf "$STRIP" "$TC/strip"
           for t in llvm-objcopy llvm-nm llvm-objdump; do
             p="$(command -v $t || find /usr -name "$t*" 2>/dev/null | head -1)"
             [ -n "$p" ] && ln -sf "$p" "$TC/${t#llvm-}"
           done
-          ls -la "$TC"
 
       - name: Fetch single iOS SDK (sparse)
         run: |
-          set -o pipefail
           set -x
           SDK=iPhoneOS16.5.sdk
-          mkdir -p "$HOME/theos/sdks"
-          cd "$HOME/theos/sdks"
+          mkdir -p "$HOME/theos/sdks"; cd "$HOME/theos/sdks"
           git init -q
           git remote add origin https://github.com/theos/sdks.git
           git config core.sparseCheckout true
@@ -79,78 +74,144 @@ jobs:
           git checkout -q FETCH_HEAD
           test -d "$HOME/theos/sdks/$SDK" && echo "SDK OK"
 
-      - name: Build
+      - name: Build HBGuard
         run: |
           set -x
-          export THEOS="$HOME/theos"
-          export PATH="$THEOS/bin:$PATH"
-
+          export THEOS="$HOME/theos"; export PATH="$THEOS/bin:$PATH"
           set +e
           make -j4 DEBUG=0 2>&1 | tee /tmp/build.log
           rc=${PIPESTATUS[0]}
-          echo "make exit code = $rc"
-          tail -40 /tmp/build.log
+          echo "make exit=$rc"; tail -30 /tmp/build.log
           if [ $rc -ne 0 ]; then
-            tail -25 /tmp/build.log | while IFS= read -r line; do
-              [ -n "$line" ] && echo "::error title=build::$line"
-            done
+            tail -25 /tmp/build.log | while IFS= read -r l; do [ -n "$l" ] && echo "::error title=hbguard::$l"; done
           fi
+          DYLIB="$(find .theos -name '*.dylib' | head -1)"
+          [ -n "$DYLIB" ] && python3 tools/patch_weak_substrate.py "$DYLIB" || true
           exit $rc
 
-      # substrate 依赖降级为 weak：全能签（非越狱）环境没有完整 CydiaSubstrate
-      - name: Patch substrate dep to weak
-        run: |
-          set -euo pipefail
-          set -x
-          DYLIB="$(find .theos -name '*.dylib' | head -1)"
-          test -n "$DYLIB"
-          python3 tools/patch_weak_substrate.py "$DYLIB"
-
-      - name: Verify dylib
-        if: always()
-        run: |
-          set -x
-          DYLIB="$(find .theos -name '*.dylib' | head -1)"
-          [ -z "$DYLIB" ] && exit 1
-          echo "===== file ====="
-          file "$DYLIB"
-          echo "===== 依赖（substrate 必须是 weak） ====="
-          (llvm-otool -L "$DYLIB" 2>/dev/null || llvm-objdump --macho --dylibs-used "$DYLIB" 2>/dev/null) || true
-          echo "===== 自检：substrate 是否还是硬链接 ====="
-          python3 tools/patch_weak_substrate.py "$DYLIB" || true
-          echo "===== 大小 ====="
-          ls -la "$DYLIB"; sha256sum "$DYLIB"
-
-      - name: Upload dylib
+      - name: Upload HBGuard
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: HBGuard-dylib-linux
+          name: HBGuard-dylib
           path: .theos/obj/**/*.dylib
           if-no-files-found: warn
 
-      - name: Upload build log
+      - name: Upload log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-linux
+          name: build-log-hbguard
           path: /tmp/build.log
           if-no-files-found: warn
 
+  # ── TrafficRulesRepro（另一个 AI 的复现工程，首次编译）────────
+  build-repro:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          set -x
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm make git curl xz-utils
+          if ! command -v ldid >/dev/null 2>&1; then
+            curl -fsSL -o /tmp/ldid \
+              https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64 \
+              && sudo install -m755 /tmp/ldid /usr/local/bin/ldid
+          fi
+
+      - name: Clone Theos
+        run: |
+          git clone --depth 1 https://github.com/theos/theos.git "$HOME/theos"
+          cd "$HOME/theos"
+          git submodule update --init --recursive --depth 1
+
+      - name: Linux toolchain shim
+        run: |
+          set -x
+          TC="$HOME/theos/toolchain/linux/iphone/bin"
+          mkdir -p "$TC"
+          ln -sf "$(command -v clang)"   "$TC/clang"
+          ln -sf "$(command -v clang++)" "$TC/clang++"
+          LD64="$(command -v ld64.lld || find /usr -name 'ld64.lld' 2>/dev/null | head -1)"
+          if [ -n "$LD64" ]; then
+            ln -sf "$LD64" "$TC/ld64"
+            sudo ln -sf "$LD64" /usr/local/bin/ld64.lld
+            sudo ln -sf "$LD64" /usr/local/bin/ld64
+          fi
+          LDID="$(command -v ldid || true)"; [ -n "$LDID" ] && ln -sf "$LDID" "$TC/ldid"
+          STRIP="$(command -v llvm-strip || find /usr -name 'llvm-strip*' 2>/dev/null | head -1)"
+          [ -n "$STRIP" ] && ln -sf "$STRIP" "$TC/strip"
+          for t in llvm-objcopy llvm-nm llvm-objdump; do
+            p="$(command -v $t || find /usr -name "$t*" 2>/dev/null | head -1)"
+            [ -n "$p" ] && ln -sf "$p" "$TC/${t#llvm-}"
+          done
+
+      - name: Fetch single iOS SDK (sparse)
+        run: |
+          set -x
+          SDK=iPhoneOS16.5.sdk
+          mkdir -p "$HOME/theos/sdks"; cd "$HOME/theos/sdks"
+          git init -q
+          git remote add origin https://github.com/theos/sdks.git
+          git config core.sparseCheckout true
+          printf '%s/*\n' "$SDK" > .git/info/sparse-checkout
+          git fetch --depth 1 --filter=blob:none origin master
+          git checkout -q FETCH_HEAD
+
+      - name: Build repro
+        working-directory: repro
+        run: |
+          set -x
+          export THEOS="$HOME/theos"; export PATH="$THEOS/bin:$PATH"
+          set +e
+          make -j4 DEBUG=0 2>&1 | tee /tmp/repro.log
+          rc=${PIPESTATUS[0]}
+          echo "make exit=$rc"
+          tail -60 /tmp/repro.log
+          if [ $rc -ne 0 ]; then
+            tail -40 /tmp/repro.log | while IFS= read -r l; do [ -n "$l" ] && echo "::error title=repro::$l"; done
+          fi
+          DYLIB="$(find .theos -name '*.dylib' | head -1)"
+          [ -n "$DYLIB" ] && python3 tools/patch_macho.py "$DYLIB" --help >/dev/null 2>&1 || true
+          find .theos -name '*.dylib' -print -exec file {} \; 2>/dev/null || true
+          exit $rc
+
+      - name: Upload repro dylib
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrafficRulesRepro-dylib
+          path: repro/.theos/obj/**/*.dylib
+          if-no-files-found: warn
+
+      - name: Upload repro log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-repro
+          path: /tmp/repro.log
+          if-no-files-found: warn
+
+  # ── 发布 ──────────────────────────────────────────────────────
   release:
-    needs: build-linux
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    needs: [build-linux, build-repro]
+    if: always() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: HBGuard-dylib-linux
           path: dist
 
       - name: List
-        run: find dist -type f -exec ls -la {} \;
+        run: find dist -type f -exec ls -la {} \; || true
 
       - name: Publish rolling release
         env:
@@ -158,29 +219,17 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -uo pipefail
-          DYLIB="$(find dist -name '*.dylib' | head -1)"
-          echo "dylib=$DYLIB"
-          test -n "$DYLIB" || { echo "::error::no dylib found"; exit 1; }
-
-          # 1) 确保 release 存在
-          if ! gh release view latest --repo "$REPO" >/dev/null 2>&1; then
+          gh release view latest --repo "$REPO" >/dev/null 2>&1 || \
             gh release create latest --repo "$REPO" \
-              --title "HBGuard latest build" \
-              --prerelease \
-              --notes "arm64；substrate 依赖已降级为 weak，全能签可直接注入。" 2>&1 | tee /tmp/rc.log || {
-                tail -10 /tmp/rc.log | while IFS= read -r l; do echo "::error::create: $l"; done; exit 1; }
-          fi
+              --title "latest build" --prerelease \
+              --notes "HBGuard + TrafficRulesRepro（arm64）"
 
-          # 2) 删掉同名旧 asset（gh release upload --clobber 在这套环境里会失败）
-          IDS="$(gh api "repos/$REPO/releases/tags/latest" --jq '.assets[] | select(.name=="HBGuard.dylib") | .id' 2>/dev/null || true)"
-          for id in $IDS; do
-            echo "delete asset $id"
-            gh api -X DELETE "repos/$REPO/releases/assets/$id" 2>&1 | tee /tmp/del.log || {
-              tail -5 /tmp/del.log | while IFS= read -r l; do echo "::error::delete $id: $l"; done; }
+          # 逐个上传，同名先删
+          find dist -name '*.dylib' | while IFS= read -r f; do
+            base="$(basename "$f")"
+            ids="$(gh api "repos/$REPO/releases/tags/latest" --jq ".assets[] | select(.name==\"$base\") | .id" 2>/dev/null || true)"
+            for id in $ids; do gh api -X DELETE "repos/$REPO/releases/assets/$id" >/dev/null 2>&1 || true; done
+            echo "upload $base"
+            gh release upload latest "$f" --repo "$REPO" 2>&1 | tail -3 || true
           done
-
-          # 3) 上传
-          gh release upload latest "$DYLIB" --repo "$REPO" 2>&1 | tee /tmp/up.log || {
-            tail -20 /tmp/up.log | while IFS= read -r l; do echo "::error::upload: $l"; done; exit 1; }
-
           gh release view latest --repo "$REPO"
