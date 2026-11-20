@@ -5,6 +5,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// Tweak.xm 编译成 .mm（Objective-C++），src/*.m 编译成 .m（Objective-C）。
+// 不加 extern "C" 时 C++ 会对这些函数做名字修饰，链接阶段全部 undefined symbol。
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 BOOL TRCIsTargetApp(void);
 
 id TRCConfigValue(NSString *key);
@@ -32,5 +38,9 @@ void TRCInstallIntegrityHooks(void);
 void TRCInstallEventHooks(void);
 void TRCInstallUpdateHooks(void);
 void TRCInstallRiskHooks(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 NS_ASSUME_NONNULL_END
