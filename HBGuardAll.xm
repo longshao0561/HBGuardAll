@@ -567,6 +567,13 @@ int hbg_rebind_one(const char *name, void *repl, void **orig) {
 
 typedef void (*HBGMSHookMessageEx_t)(Class cls, SEL sel, IMP replacement, IMP *result);
 
+// 关键：本文件会被 build_single.py 拼进 .xm，最终按 Objective-C++ 编译。
+// 不加 extern "C" 时函数名会被 C++ mangling 成 __Z15MSHookMessageExP10objc_class...，
+// 而 Logos 生成的是 C 调用 _MSHookMessageEx —— 名字对不上，等于没定义。
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void MSHookMessageEx(Class cls, SEL sel, IMP replacement, IMP *result) {
     if (!cls || !sel || !replacement) return;
 
@@ -588,6 +595,10 @@ void MSHookFunction(void *symbol, void *replace, void **result) {
     if (result) *result = NULL;
     (void)symbol; (void)replace;
 }
+
+#ifdef __cplusplus
+}
+#endif
 
 /* ==================== Tweak.xm ==================== */
 //
