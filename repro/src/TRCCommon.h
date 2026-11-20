@@ -17,8 +17,8 @@ void TRCInstallHideDylib(void);
 void TRCRebindAll(const char *symbol, void *replacement);
 
 BOOL TRCClassExists(const char *name);
-IMP TRCSwizzleClass(const char *cls, const char *sel, IMP imp);
-IMP TRCSwizzleInstance(const char *cls, const char *sel, IMP imp);
+IMP _Nullable TRCSwizzleClass(const char *cls, const char *sel, IMP imp);
+IMP _Nullable TRCSwizzleInstance(const char *cls, const char *sel, IMP imp);
 
 IMP TRCImpBool(BOOL (^block)(id));
 IMP TRCImpBool1(BOOL (^block)(id, id));

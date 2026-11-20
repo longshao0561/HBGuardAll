@@ -4,26 +4,26 @@ BOOL TRCClassExists(const char *name) {
     return name != NULL && objc_getClass(name) != Nil;
 }
 
-IMP TRCSwizzleClass(const char *clsName, const char *selName, IMP imp) {
+IMP _Nullable TRCSwizzleClass(const char *clsName, const char *selName, IMP imp) {
     Class cls = objc_getClass(clsName);
-    if (!cls || !selName || !imp) return NULL;
+    if (!cls || !selName || !imp) return (IMP)0;
 
     SEL sel = sel_registerName(selName);
     Method method = class_getClassMethod(cls, sel);
-    if (!method) return NULL;
+    if (!method) return (IMP)0;
 
     IMP old = method_getImplementation(method);
     method_setImplementation(method, imp);
     return old;
 }
 
-IMP TRCSwizzleInstance(const char *clsName, const char *selName, IMP imp) {
+IMP _Nullable TRCSwizzleInstance(const char *clsName, const char *selName, IMP imp) {
     Class cls = objc_getClass(clsName);
-    if (!cls || !selName || !imp) return NULL;
+    if (!cls || !selName || !imp) return (IMP)0;
 
     SEL sel = sel_registerName(selName);
     Method method = class_getInstanceMethod(cls, sel);
-    if (!method) return NULL;
+    if (!method) return (IMP)0;
 
     IMP old = method_getImplementation(method);
     method_setImplementation(method, imp);
