@@ -548,6 +548,47 @@ int hbg_rebind_one(const char *name, void *repl, void **orig) {
     return hbg_rebind_all(&one, 1);
 }
 
+/* ==================== Support/HBGSubstrate.m ==================== */
+//
+//  HBGSubstrate.m —— 自实现 MSHookMessageEx，彻底摆脱 CydiaSubstrate
+//
+// 为什么需要：
+//   Logos 的 %hook / %orig 会引用 _MSHookMessageEx（CydiaSubstrate 的符号）。
+//   - LC_LOAD_DYLIB 找不到库   -> "Library not loaded"        -> dyld halt
+//   - LC_LOAD_WEAK_DYLIB 找不到 -> 库可跳过，但符号仍要解析
+//                              -> "Symbol not found: _MSHookMessageEx" -> dyld halt
+//   只有把符号自己提供出来，weak 才是安全的（此时 dylib 对本库零符号引用）。
+//
+// 语义对齐 substrate：
+//   1. 优先找实例方法，找不到再找类方法（Logos 对 + 方法走的是后者）
+//   2. *result 回填原 IMP —— %orig 依赖这个
+//   3. 重复 hook 同一方法时，orig 返回上一次的替换实现（链式 hook）
+//
+
+typedef void (*HBGMSHookMessageEx_t)(Class cls, SEL sel, IMP replacement, IMP *result);
+
+void MSHookMessageEx(Class cls, SEL sel, IMP replacement, IMP *result) {
+    if (!cls || !sel || !replacement) return;
+
+    Method m = class_getInstanceMethod(cls, sel);
+    if (!m) {
+        // 类方法：元类上的实例方法
+        m = class_getClassMethod(cls, sel);
+    }
+    if (!m) return;
+
+    IMP old = method_getImplementation(m);
+    if (result) *result = old;
+    if (old == replacement) return;          // 幂等，避免自我递归
+    method_setImplementation(m, replacement);
+}
+
+// 有些 Logos 版本会引用这两个（我们只做消息 hook，这里给出空实现以满足符号解析）
+void MSHookFunction(void *symbol, void *replace, void **result) {
+    if (result) *result = NULL;
+    (void)symbol; (void)replace;
+}
+
 /* ==================== Tweak.xm ==================== */
 //
 //  Tweak.xm
