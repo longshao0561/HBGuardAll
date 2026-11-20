@@ -4,8 +4,12 @@
 #import <string.h>
 #import <unistd.h>
 #import <sys/sysctl.h>
-#import <sys/proc.h>
-#import <sys/ptrace.h>
+
+// iOS SDK 没有 <sys/proc.h> / <sys/ptrace.h>，这两个要自己声明
+#ifndef PT_DENY_ATTACH
+#define PT_DENY_ATTACH 31
+#endif
+extern int ptrace(int _request, pid_t _pid, caddr_t _addr, int _data);
 
 static int (*orig_sysctl)(int *, u_int, void *, size_t *, void *, size_t);
 static char *(*orig_getenv)(const char *);
