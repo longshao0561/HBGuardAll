@@ -175,7 +175,11 @@ jobs:
           echo "make exit=$rc"
           tail -60 /tmp/repro.log
           if [ $rc -ne 0 ]; then
-            tail -40 /tmp/repro.log | while IFS= read -r l; do [ -n "$l" ] && echo "::error title=repro::$l"; done
+            # 只把真正的 error 行转成 annotation（tail 会把编译进度挤上去）
+            grep -E 'error:|fatal error:|undefined reference|ld64[.]lld: error' /tmp/repro.log \
+              | head -25 | while IFS= read -r l; do
+                  echo "::error title=repro::$l"
+                done
           fi
           DYLIB="$(find .theos -name '*.dylib' | head -1)"
           [ -n "$DYLIB" ] && python3 tools/patch_macho.py "$DYLIB" --help >/dev/null 2>&1 || true
