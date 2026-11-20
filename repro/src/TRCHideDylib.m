@@ -9,8 +9,8 @@
 #import <sys/mman.h>
 #import <sys/sysctl.h>
 #import <mach/mach.h>
-#import <mach/mach_vm.h>
 #import <mach/vm_page_size.h>
+#import <mach/vm_map.h>   // vm_protect 在 iOS SDK 只有这里声明
 #import <mach-o/nlist.h>
 
 #if defined(__arm64e__)
